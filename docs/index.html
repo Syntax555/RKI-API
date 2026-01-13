@@ -1,55 +1,110 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <title>Baby Health Map (Germany)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <meta charset="utf-8" />
+  <title>Germany Health Map (GitHub Pages)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
-    #topbar { padding: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    #map { height: calc(100vh - 56px); }
-    select, button { padding: 6px; }
-    #status { opacity: 0.75; }
+    #topbar {
+      padding: 10px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      border-bottom: 1px solid #eee;
+    }
+    #map { height: calc(100vh - 76px); }
+    select, button, input { padding: 6px; }
+    .muted { opacity: 0.75; }
+    .group { display: flex; gap: 8px; align-items: center; }
+    .group label { display: inline-flex; gap: 6px; align-items: center; }
+    .small { font-size: 12px; }
   </style>
 </head>
+
 <body>
   <div id="topbar">
     <strong>Germany Health Signals</strong>
 
-    <label>
-      Signal
-      <select id="signal">
-        <option value="COVID_7DAY">COVID_7DAY (RKI)</option>
-      </select>
-    </label>
+    <div class="group">
+      <label>Metric
+        <select id="metric">
+          <option value="incidence_7d_per_100k">7-day incidence / 100k</option>
+          <option value="cases_7d">7-day cases</option>
+        </select>
+      </label>
+    </div>
 
-    <label>
-      Metric
-      <select id="metric">
-        <option value="incidence_7d_per_100k">7-day incidence / 100k</option>
-        <option value="cases_7d">7-day cases</option>
-      </select>
-    </label>
+    <div class="group">
+      <label><input type="radio" name="mode" value="all" checked> All Germany</label>
+      <label><input type="radio" name="mode" value="zip"> ZIP radius</label>
+    </div>
+
+    <div class="group" id="zipControls" style="display:none;">
+      <label>ZIP <input id="postcode" inputmode="numeric" placeholder="10115" size="7" /></label>
+      <label>Radius (km) <input id="radius" inputmode="decimal" placeholder="10" size="4" /></label>
+    </div>
 
     <button id="reload">Reload</button>
-    <span id="status"></span>
+    <span id="status" class="muted"></span>
+    <span class="muted small">Static (GitHub Pages): no backend required</span>
   </div>
 
   <div id="map"></div>
 
+  <!-- Leaflet -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- TopoJSON client -->
+  <script src="https://unpkg.com/topojson-client@3"></script>
+
   <script>
-    const API = "http://127.0.0.1:8000";
+    /*
+      Put these files in: /docs/data/
 
+      REQUIRED:
+        - data/counties.topo.json
+        - data/covid_7day_latest.json
+
+      FOR ZIP+RADIUS MODE (RECOMMENDED):
+        - data/zip_centroids_de.json         (postcode -> {lat, lon})
+        - data/county_centroids.json         (AGS -> {lat, lon, name})
+
+      If you don't have centroids files yet:
+        - "All Germany" mode still works (map renders & shows values).
+        - ZIP radius mode will show a message and do nothing.
+    */
+
+    const DATA = {
+      countiesTopo: "data/counties.topo.json",
+      latest: "data/covid_7day_latest.json",
+      zipCentroids: "data/zip_centroids_de.json",
+      countyCentroids: "data/county_centroids.json",
+    };
+
+    // --- Map setup ---
     const map = L.map("map", { preferCanvas: true }).setView([51.15, 10.45], 6);
-
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 18,
-      attribution: '&copy; OpenStreetMap contributors'
+      attribution: "&copy; OpenStreetMap contributors"
     }).addTo(map);
 
-    let geoLayer;
+    let geoLayer = null;
+    let countiesGeo = null;
+    let latestData = null;
+    let zipCentroids = null;
+    let countyCentroids = null;
+    let zipMarker = null;
+
+    // --- Utilities ---
+    function normalizeAGS(v) {
+      const s = String(v ?? "").trim();
+      if (/^\d+$/.test(s)) return s.padStart(5, "0");
+      return s;
+    }
 
     function pickColor(v, maxV) {
       if (v == null || !isFinite(v)) return "#cccccc";
@@ -63,57 +118,174 @@
       return "#FFEDA0";
     }
 
-    function normalizeAGS(v) {
-      const s = String(v ?? "").trim();
-      if (/^\d+$/.test(s)) return s.padStart(5, "0");
-      return s;
+    function getMode() {
+      return [...document.querySelectorAll('input[name="mode"]')].find(x => x.checked).value;
     }
 
-    async function load() {
-      const signal = document.getElementById("signal").value;
-      const metric = document.getElementById("metric").value;
-      document.getElementById("status").textContent = "Loading…";
+    function haversineKm(lat1, lon1, lat2, lon2) {
+      const R = 6371.0088;
+      const toRad = deg => deg * Math.PI / 180;
+      const p1 = toRad(lat1), p2 = toRad(lat2);
+      const dLat = p2 - p1;
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(p1) * Math.cos(p2) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
 
-      const [geojsonText, latest] = await Promise.all([
-        fetch(`${API}/regions/counties`).then(r => r.text()),
-        fetch(`${API}/signals/latest?signal=${encodeURIComponent(signal)}&metric=${encodeURIComponent(metric)}`).then(r => r.json())
+    function setStatus(msg) {
+      document.getElementById("status").textContent = msg;
+    }
+
+    // --- Loaders (cached in-memory) ---
+    async function loadCountiesOnce() {
+      if (countiesGeo) return countiesGeo;
+
+      const topo = await fetch(DATA.countiesTopo).then(r => r.json());
+
+      // We don't know object name; take first object
+      const objName = Object.keys(topo.objects)[0];
+      const geo = topojson.feature(topo, topo.objects[objName]);
+
+      countiesGeo = geo;
+      return countiesGeo;
+    }
+
+    async function loadLatestOnce() {
+      // Always reload latest file (it changes daily)
+      latestData = await fetch(DATA.latest, { cache: "no-cache" }).then(r => r.json());
+      return latestData;
+    }
+
+    async function loadZipCentroidsOnce() {
+      if (zipCentroids) return zipCentroids;
+      try {
+        zipCentroids = await fetch(DATA.zipCentroids).then(r => r.json());
+        return zipCentroids;
+      } catch {
+        zipCentroids = null;
+        return null;
+      }
+    }
+
+    async function loadCountyCentroidsOnce() {
+      if (countyCentroids) return countyCentroids;
+      try {
+        countyCentroids = await fetch(DATA.countyCentroids).then(r => r.json());
+        return countyCentroids;
+      } catch {
+        countyCentroids = null;
+        return null;
+      }
+    }
+
+    // --- Rendering ---
+    function getCountyAGSFromFeature(feature) {
+      const props = feature.properties || {};
+      // try common keys; adapt if your topology has different property names
+      return normalizeAGS(
+        props.ags || props.AGS || props.id || props.ID || props.rs || props.RS || feature.id
+      );
+    }
+
+    function getCountyNameFromFeature(feature) {
+      const props = feature.properties || {};
+      return props.name || props.NAME || props.gen || props.GEN || "County";
+    }
+
+    async function render() {
+      const mode = getMode();
+      const metric = document.getElementById("metric").value;
+
+      setStatus("Loading…");
+
+      const [geo, latest] = await Promise.all([
+        loadCountiesOnce(),
+        loadLatestOnce()
       ]);
 
-      const geo = JSON.parse(geojsonText);
+      // Build value map by AGS
+      const byAGS = new Map();
+      for (const row of (latest.values || [])) {
+        const ags = normalizeAGS(row.region_id);
+        byAGS.set(ags, row[metric]);
+      }
 
-      const byAGS = new Map(latest.values.map(x => [normalizeAGS(x.region_id), x.value]));
-      const valuesOnly = latest.values.map(x => x.value).filter(v => typeof v === "number" && isFinite(v));
+      const valuesOnly = [...byAGS.values()].filter(v => typeof v === "number" && isFinite(v));
       const maxV = valuesOnly.length ? Math.max(...valuesOnly) : 0;
 
-      document.getElementById("status").textContent = `Data date: ${latest.date}`;
+      let allowed = null; // Set of allowed counties (AGS) when ZIP mode
+      let center = null;  // {lat, lon}
+
+      if (mode === "zip") {
+        const postcode = (document.getElementById("postcode").value || "").trim();
+        const radius = Number((document.getElementById("radius").value || "").trim());
+
+        if (!postcode || !radius || !isFinite(radius) || radius <= 0) {
+          setStatus(`Date: ${latest.date} — Enter ZIP and radius.`);
+          return;
+        }
+
+        const [zips, centroids] = await Promise.all([
+          loadZipCentroidsOnce(),
+          loadCountyCentroidsOnce()
+        ]);
+
+        if (!zips || !centroids) {
+          setStatus("ZIP mode requires data/zip_centroids_de.json and data/county_centroids.json");
+          return;
+        }
+
+        const z = zips[postcode];
+        if (!z) {
+          setStatus(`ZIP "${postcode}" not found in zip_centroids_de.json`);
+          return;
+        }
+        center = { lat: Number(z.lat), lon: Number(z.lon) };
+
+        // Determine counties within radius using precomputed centroids (fast)
+        allowed = new Set();
+        for (const [ags, c] of Object.entries(centroids)) {
+          const d = haversineKm(center.lat, center.lon, Number(c.lat), Number(c.lon));
+          if (d <= radius) allowed.add(normalizeAGS(ags));
+        }
+
+        // Zoom to center
+        if (zipMarker) zipMarker.remove();
+        zipMarker = L.marker([center.lat, center.lon]).addTo(map).bindPopup(`ZIP ${postcode}`).openPopup();
+        map.setView([center.lat, center.lon], radius <= 10 ? 10 : radius <= 25 ? 9 : 8);
+
+        setStatus(`Date: ${latest.date} — ZIP ${postcode} + ${radius} km — counties in radius: ${allowed.size}`);
+      } else {
+        if (zipMarker) { zipMarker.remove(); zipMarker = null; }
+        setStatus(`Date: ${latest.date} — All Germany`);
+      }
 
       function style(feature) {
-        // dataset usually contains a county id in properties. We try common keys.
-        const props = feature.properties || {};
-        const ags =
-          normalizeAGS(props.ags || props.AGS || props.lau || props.LAU || props.id || props.ID || feature.id);
-
+        const ags = getCountyAGSFromFeature(feature);
         const v = byAGS.get(ags);
+
+        const inside = (allowed === null) ? true : allowed.has(ags);
+
         return {
-          weight: 0.6,
+          weight: inside ? 0.7 : 0.4,
           opacity: 1,
           color: "#ffffff",
-          fillOpacity: 0.75,
-          fillColor: pickColor(v, maxV)
+          fillOpacity: inside ? 0.78 : 0.15,
+          fillColor: inside ? pickColor(v, maxV) : "#dddddd"
         };
       }
 
       function onEachFeature(feature, layer) {
-        const props = feature.properties || {};
-        const name = props.name || props.NAME || props.nom || "County";
-        const ags =
-          normalizeAGS(props.ags || props.AGS || props.lau || props.LAU || props.id || props.ID || feature.id);
-
+        const ags = getCountyAGSFromFeature(feature);
+        const name = getCountyNameFromFeature(feature);
         const v = byAGS.get(ags);
 
-        layer.on("click", async () => {
+        layer.on("click", () => {
+          const outside = (allowed && !allowed.has(ags)) ? "<br/><i>Outside selected radius</i>" : "";
           layer.bindPopup(
-            `<b>${name}</b><br/>AGS: ${ags}<br/>${signal} / ${metric}: <b>${v ?? "n/a"}</b>`
+            `<b>${name}</b><br/>AGS: ${ags}<br/>Metric: <b>${metric}</b><br/>Value: <b>${v ?? "n/a"}</b>${outside}`
           ).openPopup();
         });
       }
@@ -122,8 +294,19 @@
       geoLayer = L.geoJSON(geo, { style, onEachFeature }).addTo(map);
     }
 
-    document.getElementById("reload").addEventListener("click", load);
-    load();
+    // --- UI wiring ---
+    function setupModeToggle() {
+      const zipControls = document.getElementById("zipControls");
+      document.querySelectorAll('input[name="mode"]').forEach(r => {
+        r.addEventListener("change", () => {
+          zipControls.style.display = (getMode() === "zip") ? "flex" : "none";
+        });
+      });
+    }
+
+    document.getElementById("reload").addEventListener("click", render);
+    setupModeToggle();
+    render();
   </script>
 </body>
 </html>

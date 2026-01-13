@@ -1,0 +1,33 @@
+name: Update data
+
+on:
+  schedule:
+    - cron: "30 5 * * *"   # daily 05:30 UTC (06:30 Berlin winter)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run builder
+        run: |
+          python scripts/build_data.py
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add docs/data/*.json
+          git commit -m "Update data" || echo "No changes"
+          git push
