@@ -5,24 +5,26 @@ from app.settings import settings
 SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
 
+-- normalized signal table
 CREATE TABLE IF NOT EXISTS signals (
-  disease TEXT NOT NULL,
-  region_id TEXT NOT NULL,      -- hier: Bundesland-AGS (2-stellig, z.B. "01")
-  week TEXT NOT NULL,           -- ISO-week key: "2026-W01"
+  signal TEXT NOT NULL,         -- e.g. COVID_7DAY
+  metric TEXT NOT NULL,         -- e.g. incidence_7d_per_100k, cases_7d
+  region_id TEXT NOT NULL,      -- AGS for county (5 digits), e.g. "05315"
+  date TEXT NOT NULL,           -- ISO date, e.g. "2026-01-14"
   value REAL NOT NULL,
-  metric TEXT NOT NULL,         -- z.B. "cases" oder "incidence_per_100k"
   source TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  PRIMARY KEY (disease, region_id, week, metric)
+  PRIMARY KEY (signal, metric, region_id, date)
 );
 
+-- simple cache (geojson, metadata)
 CREATE TABLE IF NOT EXISTS cache (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_signals_disease_week ON signals(disease, week);
+CREATE INDEX IF NOT EXISTS idx_signals_signal_date ON signals(signal, date);
 CREATE INDEX IF NOT EXISTS idx_signals_region ON signals(region_id);
 """
 

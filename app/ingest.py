@@ -1,3 +1,4 @@
+import csv
 import datetime as dt
 import httpx
 from dateutil import tz
@@ -6,172 +7,114 @@ from app.settings import settings
 
 BERLIN_TZ = tz.gettz("Europe/Berlin")
 
-def now_iso():
+def now_iso() -> str:
     return dt.datetime.now(tz=BERLIN_TZ).replace(microsecond=0).isoformat()
 
-def iso_week_key(year: int, week: int) -> str:
-    return f"{year:04d}-W{week:02d}"
-
-def _split_tsv(text: str):
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    header = lines[0].split("\t")
-    for ln in lines[1:]:
-        cols = ln.split("\t")
-        if len(cols) != len(header):
-            continue
-        yield dict(zip(header, cols))
-
 async def download_text(url: str) -> str:
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=60, headers={"User-Agent": "baby-health-blackbox/1.0"}) as client:
         r = await client.get(url)
         r.raise_for_status()
         return r.text
 
-def upsert_signal(*, disease: str, region_id: str, week: str, value: float, metric: str, source: str):
+def upsert_signal(*, signal: str, metric: str, region_id: str, date: str, value: float, source: str):
     with conn() as c:
         c.execute(
             """
-            INSERT INTO signals(disease, region_id, week, value, metric, source, updated_at)
+            INSERT INTO signals(signal, metric, region_id, date, value, source, updated_at)
             VALUES(?,?,?,?,?,?,?)
-            ON CONFLICT(disease, region_id, week, metric)
+            ON CONFLICT(signal, metric, region_id, date)
             DO UPDATE SET value=excluded.value, source=excluded.source, updated_at=excluded.updated_at
             """,
-            (disease, region_id, week, value, metric, source, now_iso()),
+            (signal, metric, region_id, date, value, source, now_iso()),
         )
 
-async def ingest_ifsg_influenza():
-    """
-    Influenza IfSG TSV: Bundeslandebene, wöchentlich.
-    Datei liegt im Repo als IfSG_Influenzafaelle.tsv.  [oai_citation:6‡robert-koch-institut.github.io](https://robert-koch-institut.github.io/Influenzafaelle_in_Deutschland/?utm_source=chatgpt.com)
-    """
-    text = await download_text(settings.ifsg_influenza_tsv_url)
-    rows = list(_split_tsv(text))
+async def cache_get(key: str) -> str | None:
+    with conn() as c:
+        row = c.execute("SELECT value FROM cache WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
 
-    # Feldnamen können sich ändern; wir machen defensives Mapping.
-    # Typisch: "Meldewoche", "Meldejahr", "BundeslandId" oder "IdBundesland", "Inzidenz", "Fallzahl"
-    for r in rows:
-        year = int(r.get("Meldejahr") or r.get("Jahr") or 0)
-        week = int(r.get("Meldewoche") or r.get("Woche") or 0)
-        if not year or not week:
+async def cache_set(key: str, value: str):
+    with conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO cache(key, value, updated_at) VALUES(?,?,?)",
+            (key, value, now_iso()),
+        )
+
+async def get_counties_geojson_cached() -> str:
+    """
+    Returns county GeoJSON (Landkreise). Cached in DB to keep frontend fast.
+    Source catalog: Germany: 2020 Kreise.  [oai_citation:7‡ckan.open.nrw.de](https://ckan.open.nrw.de/dataset/deutschland-2020-kreise-ne)
+    """
+    key = "geojson_counties"
+    cached = await cache_get(key)
+    if cached:
+        return cached
+
+    text = await download_text(settings.counties_geojson_url)
+    await cache_set(key, text)
+    return text
+
+def _normalize_ags(raw: str) -> str:
+    # AGS is 5 digits for counties; sometimes leading zeros are needed.
+    raw = (raw or "").strip()
+    if raw.isdigit():
+        return raw.zfill(5)
+    return raw
+
+async def ingest_rki_covid_7day_counties():
+    """
+    Ingest RKI COVID 7-day incidence/cases for counties.
+    CSV file is in the official RKI repository.  [oai_citation:8‡GitHub](https://github.com/robert-koch-institut/COVID-19_7-Tage-Inzidenz_in_Deutschland)
+
+    Columns (typical): Meldedatum, Landkreis_id, Altersgruppe, Faelle_7-Tage, Inzidenz_7-Tage, ...
+    We keep only Altersgruppe "00+" (overall), so the map is simple by default.
+    """
+    text = await download_text(settings.rki_covid_7day_counties_csv_url)
+
+    reader = csv.DictReader(text.splitlines())
+    for r in reader:
+        age = (r.get("Altersgruppe") or "").strip()
+        if age and age != "00+":
             continue
 
-        # Bundesland-Id häufig 2-stellig ("01" ... "16") oder 1..16
-        bl = r.get("BundeslandId") or r.get("IdBundesland") or r.get("Bundesland") or ""
-        if not bl:
+        date = (r.get("Meldedatum") or "").strip()  # ISO date
+        if not date:
             continue
-        region_id = f"{int(bl):02d}" if bl.isdigit() else bl.zfill(2)
 
-        # cases/incidence
-        cases = r.get("Fallzahl") or r.get("AnzahlFall") or r.get("Fälle") or ""
-        inc = r.get("Inzidenz") or r.get("Inzidenz_100000") or ""
+        county_id = _normalize_ags(r.get("Landkreis_id") or r.get("IdLandkreis") or "")
+        if not county_id:
+            continue
 
-        wk = iso_week_key(year, week)
-        if cases:
-            try:
-                upsert_signal(disease="INFLUENZA", region_id=region_id, week=wk,
-                              value=float(cases.replace(",", ".")), metric="cases",
-                              source="RKI IfSG Influenza TSV")
-            except ValueError:
-                pass
+        # metrics
+        inc = r.get("Inzidenz_7-Tage") or r.get("Inzidenz_7_Tage") or ""
+        cases7 = r.get("Faelle_7-Tage") or r.get("Faelle_7_Tage") or ""
+
         if inc:
             try:
-                upsert_signal(disease="INFLUENZA", region_id=region_id, week=wk,
-                              value=float(inc.replace(",", ".")), metric="incidence_per_100k",
-                              source="RKI IfSG Influenza TSV")
+                upsert_signal(
+                    signal="COVID_7DAY",
+                    metric="incidence_7d_per_100k",
+                    region_id=county_id,
+                    date=date,
+                    value=float(inc.replace(",", ".")),
+                    source="RKI COVID 7-day incidence (counties)"
+                )
             except ValueError:
                 pass
 
-async def ingest_ifsg_rsv():
-    """
-    RSV IfSG TSV: Bundeslandebene, wöchentlich.
-    Datei liegt im Repo als IfSG_RSVfaelle.tsv.  [oai_citation:7‡GitHub](https://github.com/robert-koch-institut/Respiratorische_Synzytialvirusfaelle_in_Deutschland?utm_source=chatgpt.com)
-    """
-    text = await download_text(settings.ifsg_rsv_tsv_url)
-    rows = list(_split_tsv(text))
-
-    for r in rows:
-        year = int(r.get("Meldejahr") or r.get("Jahr") or 0)
-        week = int(r.get("Meldewoche") or r.get("Woche") or 0)
-        if not year or not week:
-            continue
-
-        bl = r.get("BundeslandId") or r.get("IdBundesland") or r.get("Bundesland") or ""
-        if not bl:
-            continue
-        region_id = f"{int(bl):02d}" if bl.isdigit() else bl.zfill(2)
-
-        cases = r.get("Fallzahl") or r.get("AnzahlFall") or r.get("Fälle") or ""
-        inc = r.get("Inzidenz") or r.get("Inzidenz_100000") or ""
-
-        wk = iso_week_key(year, week)
-        if cases:
+        if cases7:
             try:
-                upsert_signal(disease="RSV", region_id=region_id, week=wk,
-                              value=float(cases.replace(",", ".")), metric="cases",
-                              source="RKI IfSG RSV TSV")
-            except ValueError:
-                pass
-        if inc:
-            try:
-                upsert_signal(disease="RSV", region_id=region_id, week=wk,
-                              value=float(inc.replace(",", ".")), metric="incidence_per_100k",
-                              source="RKI IfSG RSV TSV")
-            except ValueError:
-                pass
-
-async def ingest_grippeweb_are():
-    """
-    GrippeWeb: bevölkerungsbasierte Schätzungen (ARE/ILI).
-    Datei: GrippeWeb_Daten_des_Wochenberichts.tsv  [oai_citation:8‡GitHub](https://github.com/robert-koch-institut/GrippeWeb_Daten_des_Wochenberichts)
-    Für ein MVP speichern wir (wenn vorhanden) nationale oder Regionswerte als "ARE_EST".
-    """
-    text = await download_text(settings.grippeweb_tsv_url)
-    rows = list(_split_tsv(text))
-
-    # In GrippeWeb gibt es mehrere Dimensionen (Alter, Region etc.).
-    # Wir versuchen, pro Zeile: Jahr/Woche + RegionId zu finden.
-    for r in rows:
-        year = r.get("Jahr") or r.get("Meldejahr") or ""
-        week = r.get("Woche") or r.get("Meldewoche") or ""
-        if not (year and week and year.isdigit() and week.isdigit()):
-            continue
-        wk = iso_week_key(int(year), int(week))
-
-        # region: manche Dateien haben "Region" textlich. Für die Karte brauchen wir IDs.
-        # Als Blackbox speichern wir erst mal "DE" (national), falls keine ID existiert.
-        region_id = (r.get("RegionId") or r.get("AGS") or "DE").strip()
-
-        are = r.get("ARE") or r.get("ARE_Inzidenz") or r.get("ARE_pro_100000") or ""
-        if are:
-            try:
-                upsert_signal(disease="ARE_EST", region_id=region_id, week=wk,
-                              value=float(are.replace(",", ".")),
-                              metric="incidence_per_100k",
-                              source="RKI GrippeWeb TSV")
+                upsert_signal(
+                    signal="COVID_7DAY",
+                    metric="cases_7d",
+                    region_id=county_id,
+                    date=date,
+                    value=float(cases7.replace(",", ".")),
+                    source="RKI COVID 7-day incidence (counties)"
+                )
             except ValueError:
                 pass
 
 async def run_full_ingest():
-    # Reihenfolge ist egal, aber so ist’s schön lesbar
-    await ingest_ifsg_rsv()
-    await ingest_ifsg_influenza()
-    await ingest_grippeweb_are()
-
-async def get_cached_geojson():
-    """
-    GeoJSON wird remote geladen und in cache-Tabelle gespeichert,
-    damit das Frontend nicht jedes Mal ArcGIS stresst.
-    """
-    cache_key = "bundeslaender_geojson"
-    with conn() as c:
-        row = c.execute("SELECT value FROM cache WHERE key=?", (cache_key,)).fetchone()
-        if row:
-            return row["value"]
-
-    text = await download_text(settings.bundeslaender_geojson_url)
-    with conn() as c:
-        c.execute(
-            "INSERT OR REPLACE INTO cache(key, value, updated_at) VALUES(?,?,?)",
-            (cache_key, text, now_iso()),
-        )
-    return text
+    await ingest_rki_covid_7day_counties()
+    await get_counties_geojson_cached()

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Baby Health Map (Germany)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #topbar { padding: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    #map { height: calc(100vh - 56px); }
+    select, button { padding: 6px; }
+    #status { opacity: 0.75; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <strong>Germany Health Signals</strong>
+
+    <label>
+      Signal
+      <select id="signal">
+        <option value="COVID_7DAY">COVID_7DAY (RKI)</option>
+      </select>
+    </label>
+
+    <label>
+      Metric
+      <select id="metric">
+        <option value="incidence_7d_per_100k">7-day incidence / 100k</option>
+        <option value="cases_7d">7-day cases</option>
+      </select>
+    </label>
+
+    <button id="reload">Reload</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const API = "http://127.0.0.1:8000";
+
+    const map = L.map("map", { preferCanvas: true }).setView([51.15, 10.45], 6);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let geoLayer;
+
+    function pickColor(v, maxV) {
+      if (v == null || !isFinite(v)) return "#cccccc";
+      const x = maxV === 0 ? 0 : (v / maxV);
+      if (x > 0.85) return "#800026";
+      if (x > 0.70) return "#BD0026";
+      if (x > 0.55) return "#E31A1C";
+      if (x > 0.40) return "#FC4E2A";
+      if (x > 0.25) return "#FD8D3C";
+      if (x > 0.10) return "#FEB24C";
+      return "#FFEDA0";
+    }
+
+    function normalizeAGS(v) {
+      const s = String(v ?? "").trim();
+      if (/^\d+$/.test(s)) return s.padStart(5, "0");
+      return s;
+    }
+
+    async function load() {
+      const signal = document.getElementById("signal").value;
+      const metric = document.getElementById("metric").value;
+      document.getElementById("status").textContent = "Loading…";
+
+      const [geojsonText, latest] = await Promise.all([
+        fetch(`${API}/regions/counties`).then(r => r.text()),
+        fetch(`${API}/signals/latest?signal=${encodeURIComponent(signal)}&metric=${encodeURIComponent(metric)}`).then(r => r.json())
+      ]);
+
+      const geo = JSON.parse(geojsonText);
+
+      const byAGS = new Map(latest.values.map(x => [normalizeAGS(x.region_id), x.value]));
+      const valuesOnly = latest.values.map(x => x.value).filter(v => typeof v === "number" && isFinite(v));
+      const maxV = valuesOnly.length ? Math.max(...valuesOnly) : 0;
+
+      document.getElementById("status").textContent = `Data date: ${latest.date}`;
+
+      function style(feature) {
+        // dataset usually contains a county id in properties. We try common keys.
+        const props = feature.properties || {};
+        const ags =
+          normalizeAGS(props.ags || props.AGS || props.lau || props.LAU || props.id || props.ID || feature.id);
+
+        const v = byAGS.get(ags);
+        return {
+          weight: 0.6,
+          opacity: 1,
+          color: "#ffffff",
+          fillOpacity: 0.75,
+          fillColor: pickColor(v, maxV)
+        };
+      }
+
+      function onEachFeature(feature, layer) {
+        const props = feature.properties || {};
+        const name = props.name || props.NAME || props.nom || "County";
+        const ags =
+          normalizeAGS(props.ags || props.AGS || props.lau || props.LAU || props.id || props.ID || feature.id);
+
+        const v = byAGS.get(ags);
+
+        layer.on("click", async () => {
+          layer.bindPopup(
+            `<b>${name}</b><br/>AGS: ${ags}<br/>${signal} / ${metric}: <b>${v ?? "n/a"}</b>`
+          ).openPopup();
+        });
+      }
+
+      if (geoLayer) geoLayer.remove();
+      geoLayer = L.geoJSON(geo, { style, onEachFeature }).addTo(map);
+    }
+
+    document.getElementById("reload").addEventListener("click", load);
+    load();
+  </script>
+</body>
+</html>
