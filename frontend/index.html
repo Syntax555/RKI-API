@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Baby Disease Map (MVP)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    #map { height: 92vh; }
+    .bar { padding: 8px; font-family: sans-serif; }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    Disease:
+    <select id="disease">
+      <option value="RSV">RSV</option>
+      <option value="INFLUENZA">INFLUENZA</option>
+    </select>
+    Metric:
+    <select id="metric">
+      <option value="incidence_per_100k">Inzidenz / 100k</option>
+      <option value="cases">Fälle</option>
+    </select>
+    <button id="reload">Reload</button>
+    <span id="info"></span>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const API = "http://127.0.0.1:8000";
+
+    const map = L.map('map').setView([51.2, 10.4], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18, attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    let layer;
+
+    function colorFor(v, maxV) {
+      if (v == null) return null;
+      // simple 0..max scale -> pick a few buckets
+      const x = maxV === 0 ? 0 : (v / maxV);
+      if (x > 0.8) return "#800026";
+      if (x > 0.6) return "#BD0026";
+      if (x > 0.4) return "#E31A1C";
+      if (x > 0.2) return "#FC4E2A";
+      if (x > 0.1) return "#FD8D3C";
+      return "#FEB24C";
+    }
+
+    async function load() {
+      const disease = document.getElementById("disease").value;
+      const metric = document.getElementById("metric").value;
+
+      const [geojsonText, latest] = await Promise.all([
+        fetch(`${API}/regions`).then(r => r.text()),
+        fetch(`${API}/latest?disease=${encodeURIComponent(disease)}&metric=${encodeURIComponent(metric)}`).then(r => r.json())
+      ]);
+
+      document.getElementById("info").textContent = `Week: ${latest.week}`;
+
+      const geo = JSON.parse(geojsonText);
+
+      // latest.values -> map by region_id (wir nehmen die 2-stellige Bundesland-ID)
+      const byId = new Map(latest.values.map(x => [String(x.region_id).padStart(2,"0"), x.value]));
+      const valuesOnly = latest.values.map(x => x.value).filter(v => typeof v === "number");
+      const maxV = valuesOnly.length ? Math.max(...valuesOnly) : 0;
+
+      function style(feature) {
+        // Bei ArcGIS-GeoJSON hängt die ID/Properties manchmal an unterschiedlichen Stellen.
+        // Wir versuchen: feature.id oder feature.properties.* (falls vorhanden)
+        const fid = (feature.id != null) ? String(feature.id).padStart(2,"0") : null;
+        const pid = feature.properties?.AGS || feature.properties?.id || feature.properties?.RS || null;
+        const id = (pid != null) ? String(pid).padStart(2,"0") : fid;
+
+        const v = id ? byId.get(id) : null;
+        const fillColor = colorFor(v, maxV);
+
+        return {
+          weight: 1,
+          opacity: 1,
+          color: 'white',
+          fillOpacity: fillColor ? 0.75 : 0.1,
+          fillColor: fillColor || '#cccccc'
+        };
+      }
+
+      function onEachFeature(feature, layer) {
+        const name = feature.properties?.SHN1NAMN1 || feature.properties?.name || "Bundesland";
+        const fid = (feature.id != null) ? String(feature.id).padStart(2,"0") : null;
+        const pid = feature.properties?.AGS || feature.properties?.id || feature.properties?.RS || null;
+        const id = (pid != null) ? String(pid).padStart(2,"0") : fid;
+
+        const v = id ? byId.get(id) : null;
+        layer.bindPopup(`<b>${name}</b><br/>${disease} (${metric}): ${v ?? "n/a"}`);
+      }
+
+      if (layer) layer.remove();
+      layer = L.geoJSON(geo, {style, onEachFeature}).addTo(map);
+    }
+
+    document.getElementById("reload").addEventListener("click", load);
+    load();
+  </script>
+</body>
+</html>
