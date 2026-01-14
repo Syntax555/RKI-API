@@ -1,9 +1,6 @@
 /* app.js
-   Simple + optimized GitHub Pages map:
-   - Leaflet choropleth by Landkreis
-   - Loads: data/latest.json, data/timeseries.json, data/landkreise.geojson
-   - Metric selector: incidence_7d, cases_7d, trend_pct
-   - Hover tooltip, click panel + Chart.js time series
+   Fixes "no data" by normalizing district IDs to 5-digit keys (AGS/Kreisschlüssel).
+   Works with GeoJSON that has ARS/RS (often 12 digits) and RKI data that uses 5-digit Landkreis_id.
 */
 
 /* global L, Chart */
@@ -28,10 +25,6 @@ const STATE = {
   map: null
 };
 
-/* -----------------------------
-   Helpers
------------------------------- */
-
 const $ = (id) => document.getElementById(id);
 
 function clamp(n, lo, hi) {
@@ -49,15 +42,33 @@ function getDistrictName(feature) {
   return p.gen ?? p.GEN ?? p.name ?? p.NAME ?? "Unknown";
 }
 
-function getDistrictId(feature) {
-  // BKG VG250 WFS often has "ars" for Landkreis
+/**
+ * Normalize any district code to a 5-digit Kreis key.
+ * - strip non-digits
+ * - if 12 digits (ARS/RS), take first 5 (Kreis)
+ * - if < 5, pad with leading zeros
+ */
+function normalizeDistrictKey(raw) {
+  if (raw === null || raw === undefined) return "";
+  let s = String(raw).replace(/\D/g, ""); // digits only
+  if (!s) return "";
+
+  // ARS/RS can be 12 digits. For Landkreis, the first 5 digits are the Kreisschlüssel.
+  if (s.length > 5) s = s.slice(0, 5);
+
+  // RKI keys are 5 digits with leading zeros (e.g. 06533)
+  if (s.length < 5) s = s.padStart(5, "0");
+
+  return s;
+}
+
+function getDistrictKeyFromFeature(feature) {
   const p = feature?.properties || {};
-  const id = p.ars ?? p.ARS ?? p.rs ?? p.RS ?? p.ags ?? p.AGS ?? "";
-  return String(id).trim();
+  const raw = p.ars ?? p.ARS ?? p.rs ?? p.RS ?? p.ags ?? p.AGS ?? p.krs ?? p.KRS ?? "";
+  return normalizeDistrictKey(raw);
 }
 
 function colorRamp(t) {
-  // Very light -> darker blue; fast + no deps
   const x = clamp(t, 0, 1);
   const v = Math.round(245 - x * 170); // 245..75
   return `rgb(${v},${v},255)`;
@@ -72,17 +83,10 @@ function computeMetaMinMax(latestValues, metric) {
       if (v > max) max = v;
     }
   }
-  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
-    return { min: 0, max: 1 };
-  }
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) return { min: 0, max: 1 };
   return { min, max };
 }
 
-/**
- * Robust JSON loader for GitHub Pages.
- * - Resolves relative paths against current page URL (important for /REPO/ pages)
- * - Fetches text first so we can debug truncation / HTML / empties
- */
 async function loadJson(relPath) {
   const url = new URL(relPath, window.location.href);
   const r = await fetch(url, { cache: "no-store" });
@@ -93,9 +97,7 @@ async function loadJson(relPath) {
   }
 
   const text = await r.text();
-  if (!text || text.trim().length < 2) {
-    throw new Error(`Empty response from ${url}`);
-  }
+  if (!text || text.trim().length < 2) throw new Error(`Empty response from ${url}`);
 
   try {
     return JSON.parse(text);
@@ -108,12 +110,12 @@ async function loadJson(relPath) {
    Data access
 ------------------------------ */
 
-function latestForId(id) {
-  return STATE.latest?.values?.[id] ?? null;
+function latestForKey(key5) {
+  return STATE.latest?.values?.[key5] ?? null;
 }
 
-function metricValueForId(id) {
-  const v = latestForId(id);
+function metricValueForKey(key5) {
+  const v = latestForKey(key5);
   if (!v) return null;
   const x = v[STATE.metric];
   return (typeof x === "number" && Number.isFinite(x)) ? x : null;
@@ -126,13 +128,11 @@ function metricValueForId(id) {
 function buildLegend() {
   const el = $("legend");
   if (!el) return;
-
   el.innerHTML = "";
 
   const latestValues = STATE.latest?.values || {};
   const meta = STATE.latest?.metric_meta?.[STATE.metric] || computeMetaMinMax(latestValues, STATE.metric);
 
-  // 5 swatches labeled by metric values at those stops
   const stops = 5;
   for (let i = 0; i < stops; i++) {
     const q = i / (stops - 1);
@@ -143,7 +143,6 @@ function buildLegend() {
     sw.style.background = colorRamp(q);
 
     const lab = document.createElement("span");
-    // trend is %; others are numeric
     const digits = (STATE.metric === "cases_7d") ? 0 : 1;
     lab.textContent = `${formatNumber(value, digits)}${STATE.metric === "trend_pct" ? "%" : ""}`;
 
@@ -168,8 +167,8 @@ function refreshLayerStyles() {
 ------------------------------ */
 
 function styleFeature(feature) {
-  const id = getDistrictId(feature);
-  const v = metricValueForId(id);
+  const key = getDistrictKeyFromFeature(feature);
+  const v = metricValueForKey(key);
 
   const latestValues = STATE.latest?.values || {};
   const meta = STATE.latest?.metric_meta?.[STATE.metric] || computeMetaMinMax(latestValues, STATE.metric);
@@ -187,9 +186,9 @@ function styleFeature(feature) {
 
 function tooltipHtml(feature) {
   const name = getDistrictName(feature);
-  const id = getDistrictId(feature);
+  const key = getDistrictKeyFromFeature(feature);
 
-  const v = latestForId(id);
+  const v = latestForKey(key);
   const inc = v?.incidence_7d ?? null;
   const cases = v?.cases_7d ?? null;
   const trend = v?.trend_pct ?? null;
@@ -200,7 +199,7 @@ function tooltipHtml(feature) {
       7-day incidence (0–14): <b>${formatNumber(inc, 1)}</b><br/>
       7-day cases (0–14): <b>${formatNumber(cases, 0)}</b><br/>
       Trend vs prev week: <b>${formatNumber(trend, 1)}%</b><br/>
-      ID: <span style="color:#666">${id || "—"}</span>
+      Key (5-digit): <span style="color:#666">${key || "—"}</span>
     </div>
   `;
 }
@@ -210,8 +209,8 @@ function onEachFeature(feature, layer) {
 
   layer.on("click", () => {
     const name = getDistrictName(feature);
-    const id = getDistrictId(feature);
-    showPanel(name, id);
+    const key = getDistrictKeyFromFeature(feature);
+    showPanel(name, key);
   });
 }
 
@@ -249,14 +248,14 @@ function initChart() {
   });
 }
 
-function showPanel(name, id) {
+function showPanel(name, key5) {
   $("panelTitle").textContent = name;
 
   const updated = STATE.latest?.updated_at ?? "unknown";
-  const v = latestForId(id);
+  const v = latestForKey(key5);
 
   if (!v) {
-    $("panelSubtitle").textContent = `No data for this district. Updated: ${updated}`;
+    $("panelSubtitle").textContent = `No data for this district. Updated: ${updated} • Key: ${key5 || "—"}`;
     if (STATE.chart) {
       STATE.chart.data.labels = [];
       STATE.chart.data.datasets[0].data = [];
@@ -266,9 +265,9 @@ function showPanel(name, id) {
   }
 
   $("panelSubtitle").textContent =
-    `Updated: ${updated} • 7d incidence: ${formatNumber(v.incidence_7d, 1)} • 7d cases: ${formatNumber(v.cases_7d, 0)} • Trend: ${formatNumber(v.trend_pct, 1)}%`;
+    `Updated: ${updated} • Key: ${key5} • 7d incidence: ${formatNumber(v.incidence_7d, 1)} • 7d cases: ${formatNumber(v.cases_7d, 0)} • Trend: ${formatNumber(v.trend_pct, 1)}%`;
 
-  const series = STATE.timeseries?.series?.[id];
+  const series = STATE.timeseries?.series?.[key5];
   if (!series || !STATE.chart) return;
 
   STATE.chart.data.labels = series.map(pt => pt.date);
@@ -281,7 +280,6 @@ function showPanel(name, id) {
 ------------------------------ */
 
 async function main() {
-  // Map
   STATE.map = L.map("map", { zoomSnap: 0.25 }).setView(CONFIG.center, CONFIG.zoom);
 
   L.tileLayer(CONFIG.tileUrl, {
@@ -289,7 +287,6 @@ async function main() {
     attribution: CONFIG.tileAttribution
   }).addTo(STATE.map);
 
-  // Load all data in parallel
   const [latest, timeseries, geo] = await Promise.all([
     loadJson("data/latest.json"),
     loadJson("data/timeseries.json"),
@@ -300,7 +297,7 @@ async function main() {
   STATE.timeseries = timeseries;
   STATE.geo = geo;
 
-  // Ensure metric_meta exists (older/latest.json might not include it)
+  // Ensure metric_meta exists
   if (!STATE.latest.metric_meta) STATE.latest.metric_meta = {};
   for (const m of ["incidence_7d", "cases_7d", "trend_pct"]) {
     if (!STATE.latest.metric_meta[m]) {
@@ -308,22 +305,18 @@ async function main() {
     }
   }
 
-  // Updated label
   const updatedAt = $("updatedAt");
   if (updatedAt) updatedAt.textContent = latest.updated_at ? `Updated: ${latest.updated_at}` : "";
 
-  // Geo layer
   STATE.layer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(STATE.map);
 
-  // Fit to bounds (Germany)
   try {
     STATE.map.fitBounds(STATE.layer.getBounds(), { padding: [10, 10] });
-  } catch (_) { /* ignore */ }
+  } catch (_) {}
 
   initChart();
   buildLegend();
 
-  // Metric selector
   const metricSel = $("metric");
   if (metricSel) {
     metricSel.value = STATE.metric;
@@ -332,14 +325,21 @@ async function main() {
       refreshLayerStyles();
     });
   }
+
+  // Debug: show whether keys match at all
+  // Pick first feature and log its derived key + whether latest has it
+  const first = geo?.features?.[0];
+  if (first) {
+    const k = getDistrictKeyFromFeature(first);
+    console.log("Debug sample key:", k, "hasData:", !!STATE.latest?.values?.[k]);
+  }
 }
 
-// Start
 main().catch((err) => {
   console.error(err);
   alert(
     "Failed to load map data.\n\n" +
-    "Open DevTools → Console to see which file failed.\n\n" +
+    "Open DevTools → Console to see details.\n\n" +
     String(err)
   );
 });
