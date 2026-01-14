@@ -9,7 +9,7 @@ def main():
     # Properly constructed request object
     hierarchy_request = {
         "CubeId": "SurvStat",
-        "Language": "de"
+        "Language": "German"
     }
 
     print("=== Hierarchies ===")
