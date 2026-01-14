@@ -25,10 +25,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install zeep
 
-      - name: List SurvStat diseases / measures (debug)
+      - name: List SurvStat diseases / measures
         continue-on-error: true
         run: |
           python scripts/survstat_list_diseases.py || true
+
 
       - name: Dump SurvStat SOAP signatures (debug)
         continue-on-error: true
