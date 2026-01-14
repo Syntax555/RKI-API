@@ -4,7 +4,7 @@ import json
 import math
 import os
 import sys
-from collections import defaultdict
+from collections import defaultdict, Counter
 from datetime import datetime, timedelta
 from urllib.request import urlopen, Request
 
@@ -17,8 +17,9 @@ RKI_LK_CSV = (
 OUT_LATEST = "data/latest.json"
 OUT_SERIES = "data/timeseries.json"
 
-AGE_GROUPS = {"00-04", "05-14"}  # babies + children
-DAYS_BACK = 60                  # time series length
+# we'll discover actual labels; these are common expected values
+TARGET_AGE_GROUPS = {"00-04", "05-14"}
+DAYS_BACK = 60
 
 
 def safe_int(x):
@@ -37,25 +38,14 @@ def fetch_csv(url: str) -> list[dict]:
 
 
 def normalize_lk(lk_raw: str) -> str:
-    """
-    Normalize Landkreis_id to a 5-digit key (with leading zeros).
-    Examples:
-      '6533' -> '06533'
-      '01001' -> '01001'
-    """
     if lk_raw is None:
         return ""
     s = str(lk_raw).strip()
-
-    # keep digits only (defensive)
     s = "".join(ch for ch in s if ch.isdigit())
     if not s:
         return ""
-
-    # Some datasets might provide longer codes; take first 5
     if len(s) > 5:
         s = s[:5]
-
     return s.zfill(5)
 
 
@@ -72,7 +62,6 @@ def pct_change(new: float | None, old: float | None) -> float | None:
 
 
 def get_field(row: dict, *names: str) -> str:
-    """Return the first matching field value for possible column name variants."""
     for n in names:
         if n in row and row[n] is not None:
             return row[n]
@@ -84,26 +73,48 @@ def main():
 
     rows = fetch_csv(RKI_LK_CSV)
     if not rows:
-        print("CSV returned no rows.", file=sys.stderr)
+        print("ERROR: CSV returned no rows.", file=sys.stderr)
         sys.exit(1)
 
-    # Aggregate by (date, lk) across age groups 00-04 and 05-14
+    # --- Diagnostics: print headers + some stats
+    headers = list(rows[0].keys())
+    print("CSV headers:", headers[:40], "..." if len(headers) > 40 else "")
+    print("Total CSV rows:", len(rows))
+
+    age_counter = Counter()
+    lk_sample = []
+    date_sample = []
+
+    # Aggregate by (date, lk) across target age groups
     agg = defaultdict(lambda: {"pop": 0, "cases_7d": 0})
     dates = set()
 
+    passed = 0
+    missing_cols = 0
+
     for r in rows:
         date = get_field(r, "Meldedatum", "Datum").strip()
-
         lk_raw = get_field(r, "Landkreis_id", "Landkreis ID", "LK_ID", "IdLandkreis").strip()
-        lk = normalize_lk(lk_raw)
-
         age = get_field(r, "Altersgruppe", "Altergruppe", "AgeGroup").strip()
 
-        # Column variants for population/cases
         pop_raw = get_field(r, "Bevoelkerung", "Bevölkerung", "Population").strip()
         c7_raw = get_field(r, "Faelle_7-Tage", "Faelle_7_Tage", "Fälle_7-Tage", "Cases_7d").strip()
 
-        if not date or not lk or age not in AGE_GROUPS:
+        if age:
+            age_counter[age] += 1
+
+        if lk_raw and len(lk_sample) < 5:
+            lk_sample.append(lk_raw)
+        if date and len(date_sample) < 5:
+            date_sample.append(date)
+
+        if not date or not lk_raw or not age:
+            missing_cols += 1
+            continue
+
+        lk = normalize_lk(lk_raw)
+
+        if age not in TARGET_AGE_GROUPS:
             continue
 
         pop = safe_int(pop_raw)
@@ -115,15 +126,19 @@ def main():
         agg[key]["pop"] += pop
         agg[key]["cases_7d"] += c7
         dates.add(date)
+        passed += 1
+
+    print("Sample Landkreis_id values:", lk_sample)
+    print("Sample dates:", date_sample)
+    print("Top age groups in file:", age_counter.most_common(10))
+    print("Rows passing filter (target ages + required cols):", passed)
 
     if not dates:
         print(
-            "No data after filtering.\n"
-            "Likely causes:\n"
-            "- Age group labels differ from {'00-04','05-14'}\n"
-            "- Column names changed\n"
-            "- Landkreis_id missing\n",
-            file=sys.stderr,
+            "\nERROR: No data after filtering.\n"
+            "Most likely: age labels are not exactly '00-04' and '05-14'.\n"
+            "Look at 'Top age groups' above and update TARGET_AGE_GROUPS.\n",
+            file=sys.stderr
         )
         sys.exit(1)
 
@@ -133,7 +148,7 @@ def main():
     start_dt = latest_dt - timedelta(days=DAYS_BACK - 1)
     start_date = start_dt.strftime("%Y-%m-%d")
 
-    # time series per lk
+    # time series per district
     series = defaultdict(list)
     for (date, lk), v in agg.items():
         if date < start_date or date > latest_date:
@@ -147,10 +162,8 @@ def main():
     for lk in list(series.keys()):
         series[lk].sort(key=lambda x: x["date"])
 
-    # latest values + trend vs previous week
     latest_values = {}
-    prev_dt = latest_dt - timedelta(days=7)
-    prev_date = prev_dt.strftime("%Y-%m-%d")
+    prev_date = (latest_dt - timedelta(days=7)).strftime("%Y-%m-%d")
 
     for lk in series.keys():
         pts = {p["date"]: p["incidence_7d"] for p in series[lk]}
@@ -171,10 +184,14 @@ def main():
             "trend_pct": trend
         }
 
+    if not latest_values:
+        print("ERROR: latest_values is empty after processing.", file=sys.stderr)
+        sys.exit(1)
+
     metric_meta = {}
     for metric in ["incidence_7d", "cases_7d", "trend_pct"]:
         vals = []
-        for _, v in latest_values.items():
+        for v in latest_values.values():
             x = v.get(metric)
             if isinstance(x, (int, float)) and math.isfinite(x):
                 vals.append(float(x))
@@ -182,7 +199,7 @@ def main():
 
     latest_out = {
         "updated_at": latest_date,
-        "notes": "Combined ages 00-04 and 05-14 (0-14). Landkreis_id normalized to 5 digits.",
+        "notes": "Combined two age groups from source. Landkreis_id normalized to 5 digits.",
         "metric_meta": metric_meta,
         "values": latest_values
     }
@@ -200,7 +217,7 @@ def main():
         json.dump(series_out, f, ensure_ascii=False, separators=(",", ":"))
 
     print(f"Wrote {OUT_LATEST} and {OUT_SERIES} for date {latest_date}")
-    print(f"Districts in latest: {len(latest_values)}")
+    print("Districts in latest:", len(latest_values))
 
 
 if __name__ == "__main__":
