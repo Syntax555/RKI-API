@@ -14,7 +14,7 @@
       <h1>Kids Health Activity Map (Germany)</h1>
       <p class="sub">
         <span id="diseaseLabel">Loading…</span>
-        <span id="updatedAt"></span>
+        • <span id="updatedAt"></span>
       </p>
     </div>
 
@@ -53,11 +53,13 @@
         <ul>
           <li>This is informational only, not medical advice.</li>
           <li>Reporting delays and revisions can happen.</li>
+          <li>If a dataset is Bundesland-level, every district in that state shows the same value.</li>
         </ul>
 
         <h3>Data sources</h3>
         <ul>
-          <li>RKI / SurvStat are potential sources for notifiable diseases. :contentReference[oaicite:1]{index=1}</li>
+          <li>RKI Open Data (GitHub) datasets used by the update script.</li>
+          <li>District boundaries: your <code>data/landkreise.geojson</code>.</li>
         </ul>
       </div>
     </aside>
