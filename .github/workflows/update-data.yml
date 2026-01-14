@@ -20,6 +20,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install zeep
+
+      - name: SurvStat discover (prints available disease dimensions)
+        run: |
+          python scripts/survstat_discover.py
+
       - name: Update JSON data
         run: |
           python scripts/update_data.py
