@@ -248,8 +248,8 @@ def build_weekly_state_dataset(
 
     weeks_sorted = sorted(weeks, key=week_key)
     latest_week = weeks_sorted[-1]
-    keep_weeks = set(weeks_sorted[-WEEKLY_WEEKS_BACK"])
-
+    keep_weeks = set(weeks_sorted[-WEEKLY_WEEKS_BACK:])
+    
     # Build per-state series
     state_series = defaultdict(list)
     for (week, state_id), v in by_week_state.items():
