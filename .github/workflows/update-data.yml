@@ -25,9 +25,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install zeep
 
-      - name: SurvStat discover (prints available disease dimensions)
+      - name: List SurvStat diseases / measures
         run: |
-          python scripts/survstat_discover.py
+          python scripts/survstat_list_diseases.py
+
 
       - name: Update JSON data
         run: |
