@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kids Health Activity Map (Germany)</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="title">
+      <h1>Kids Health Activity Map (Germany)</h1>
+      <p class="sub">
+        Shows higher/lower reported activity for children (0–14) based on public data.
+        <span id="updatedAt"></span>
+      </p>
+    </div>
+
+    <div class="controls">
+      <label>
+        Metric
+        <select id="metric">
+          <option value="incidence_7d">7-day incidence / 100k (0–14)</option>
+          <option value="cases_7d">7-day cases (0–14)</option>
+          <option value="trend_pct">Trend vs. previous week (%)</option>
+        </select>
+      </label>
+      <div class="legend" id="legend"></div>
+    </div>
+  </header>
+
+  <main>
+    <div id="map"></div>
+
+    <aside id="panel">
+      <div class="panel-header">
+        <h2 id="panelTitle">Click a district</h2>
+        <p id="panelSubtitle"></p>
+      </div>
+
+      <canvas id="chart" width="420" height="240"></canvas>
+
+      <div class="panel-notes">
+        <h3>Important</h3>
+        <ul>
+          <li>This is informational only, not medical advice.</li>
+          <li>Reporting delays and revisions can happen.</li>
+          <li>“Higher activity” ≠ guaranteed risk; use common sense + pediatric guidance.</li>
+        </ul>
+
+        <h3>Data sources</h3>
+        <ul>
+          <li>RKI: COVID-19 7-day incidence dataset (Landkreis level, age groups).  [oai_citation:3‡GitHub](https://github.com/robert-koch-institut/COVID-19_7-Tage-Inzidenz_in_Deutschland)</li>
+          <li>BKG: VG250 administrative boundaries via WFS.  [oai_citation:4‡Geodatenzentrum](https://gdz.bkg.bund.de/index.php/default/wfs-verwaltungsgebiete-1-250-000-stand-01-01-wfs-vg250.html)</li>
+        </ul>
+      </div>
+    </aside>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,9 +1,9 @@
 name: Update data
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "30 5 * * *"   # daily 05:30 UTC (≈ 06:30 Berlin winter)
-  workflow_dispatch: {}
+    - cron: "20 3 * * *" # daily at 03:20 UTC
 
 permissions:
   contents: write
@@ -15,31 +15,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Update JSON data
         run: |
-          pip install -r scripts/requirements.txt
+          python scripts/update_data.py
 
-      - name: Build signals
+      - name: Commit and push if changed
         run: |
-          python scripts/build_data.py
-
-      - name: Build centroids (requires boundaries)
-        run: |
-          python scripts/build_centroids.py
-
-      - name: Build catalog
-        run: |
-          python scripts/build_catalog.py
-
-      - name: Commit & push
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add docs/data/catalog.json docs/data/signals/*.json docs/data/lookups/*.json
-          git commit -m "Update data" || echo "No changes"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/latest.json data/timeseries.json
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git commit -m "Update data"
           git push
