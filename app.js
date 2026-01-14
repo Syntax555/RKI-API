@@ -1,4 +1,22 @@
+/* app.js
+   Simple + optimized GitHub Pages map:
+   - Leaflet choropleth by Landkreis
+   - Loads: data/latest.json, data/timeseries.json, data/landkreise.geojson
+   - Metric selector: incidence_7d, cases_7d, trend_pct
+   - Hover tooltip, click panel + Chart.js time series
+*/
+
 /* global L, Chart */
+
+"use strict";
+
+const CONFIG = {
+  center: [51.1, 10.4],
+  zoom: 6,
+  tileUrl: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+  tileAttribution: "&copy; OpenStreetMap contributors",
+  maxZoom: 10
+};
 
 const STATE = {
   metric: "incidence_7d",
@@ -6,63 +24,128 @@ const STATE = {
   timeseries: null,
   geo: null,
   layer: null,
-  chart: null
+  chart: null,
+  map: null
 };
 
-function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+/* -----------------------------
+   Helpers
+------------------------------ */
 
-function colorRamp(t) {
-  // Simple single-hue ramp without external libs
-  // t in [0,1] -> light to dark
-  const x = clamp(t, 0, 1);
-  const v = Math.round(245 - x * 170); // 245..75
-  return `rgb(${v}, ${v}, 255)`;        // bluish
+const $ = (id) => document.getElementById(id);
+
+function clamp(n, lo, hi) {
+  return n < lo ? lo : (n > hi ? hi : n);
+}
+
+function formatNumber(n, digits = 1) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  if (!Number.isFinite(n)) return "—";
+  return new Intl.NumberFormat("de-DE", { maximumFractionDigits: digits }).format(n);
+}
+
+function getDistrictName(feature) {
+  const p = feature?.properties || {};
+  return p.gen ?? p.GEN ?? p.name ?? p.NAME ?? "Unknown";
 }
 
 function getDistrictId(feature) {
-  // BKG VG250 typically uses "ars" (often lowercase in GeoJSON)
-  // We normalize.
-  const p = feature.properties || {};
-  return String(p.ars ?? p.ARS ?? p.rs ?? p.RS ?? p.ags ?? p.AGS ?? "").trim();
+  // BKG VG250 WFS often has "ars" for Landkreis
+  const p = feature?.properties || {};
+  const id = p.ars ?? p.ARS ?? p.rs ?? p.RS ?? p.ags ?? p.AGS ?? "";
+  return String(id).trim();
 }
 
-function formatNumber(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 }).format(n);
+function colorRamp(t) {
+  // Very light -> darker blue; fast + no deps
+  const x = clamp(t, 0, 1);
+  const v = Math.round(245 - x * 170); // 245..75
+  return `rgb(${v},${v},255)`;
+}
+
+function computeMetaMinMax(latestValues, metric) {
+  let min = Infinity, max = -Infinity;
+  for (const k in latestValues) {
+    const v = latestValues[k]?.[metric];
+    if (typeof v === "number" && Number.isFinite(v)) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
+    return { min: 0, max: 1 };
+  }
+  return { min, max };
+}
+
+/**
+ * Robust JSON loader for GitHub Pages.
+ * - Resolves relative paths against current page URL (important for /REPO/ pages)
+ * - Fetches text first so we can debug truncation / HTML / empties
+ */
+async function loadJson(relPath) {
+  const url = new URL(relPath, window.location.href);
+  const r = await fetch(url, { cache: "no-store" });
+
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`Failed to load ${url} (${r.status}). Body: ${t.slice(0, 160)}`);
+  }
+
+  const text = await r.text();
+  if (!text || text.trim().length < 2) {
+    throw new Error(`Empty response from ${url}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`Bad JSON from ${url}. First 160 chars: ${text.slice(0, 160)}`);
+  }
+}
+
+/* -----------------------------
+   Data access
+------------------------------ */
+
+function latestForId(id) {
+  return STATE.latest?.values?.[id] ?? null;
 }
 
 function metricValueForId(id) {
-  const v = STATE.latest?.values?.[id];
+  const v = latestForId(id);
   if (!v) return null;
-  return v[STATE.metric] ?? null;
+  const x = v[STATE.metric];
+  return (typeof x === "number" && Number.isFinite(x)) ? x : null;
 }
 
+/* -----------------------------
+   Legend
+------------------------------ */
+
 function buildLegend() {
-  const el = document.getElementById("legend");
+  const el = $("legend");
+  if (!el) return;
+
   el.innerHTML = "";
 
-  // Use quantiles from latest values for a stable legend.
-  const vals = Object.values(STATE.latest.values)
-    .map(o => o[STATE.metric])
-    .filter(x => typeof x === "number" && isFinite(x))
-    .sort((a,b) => a-b);
+  const latestValues = STATE.latest?.values || {};
+  const meta = STATE.latest?.metric_meta?.[STATE.metric] || computeMetaMinMax(latestValues, STATE.metric);
 
-  if (vals.length === 0) {
-    el.textContent = "No data";
-    return;
-  }
-
+  // 5 swatches labeled by metric values at those stops
   const stops = 5;
   for (let i = 0; i < stops; i++) {
     const q = i / (stops - 1);
-    const idx = Math.floor(q * (vals.length - 1));
-    const val = vals[idx];
+    const value = meta.min + q * (meta.max - meta.min);
+
     const sw = document.createElement("span");
     sw.className = "swatch";
     sw.style.background = colorRamp(q);
 
     const lab = document.createElement("span");
-    lab.textContent = `${formatNumber(val)}`;
+    // trend is %; others are numeric
+    const digits = (STATE.metric === "cases_7d") ? 0 : 1;
+    lab.textContent = `${formatNumber(value, digits)}${STATE.metric === "trend_pct" ? "%" : ""}`;
 
     const wrap = document.createElement("span");
     wrap.style.display = "inline-flex";
@@ -75,16 +158,24 @@ function buildLegend() {
   }
 }
 
+function refreshLayerStyles() {
+  if (STATE.layer) STATE.layer.setStyle(styleFeature);
+  buildLegend();
+}
+
+/* -----------------------------
+   Leaflet styling + tooltip
+------------------------------ */
+
 function styleFeature(feature) {
   const id = getDistrictId(feature);
   const v = metricValueForId(id);
 
-  // Normalize v to 0..1 using min/max of current metric in latest.json
-  const mm = STATE.latest.metric_meta?.[STATE.metric];
+  const latestValues = STATE.latest?.values || {};
+  const meta = STATE.latest?.metric_meta?.[STATE.metric] || computeMetaMinMax(latestValues, STATE.metric);
+
   let t = 0;
-  if (v !== null && mm && mm.max > mm.min) {
-    t = (v - mm.min) / (mm.max - mm.min);
-  }
+  if (v !== null && meta.max > meta.min) t = (v - meta.min) / (meta.max - meta.min);
 
   return {
     weight: 1,
@@ -94,52 +185,45 @@ function styleFeature(feature) {
   };
 }
 
-function tooltipText(feature) {
-  const p = feature.properties || {};
-  const name = p.gen ?? p.GEN ?? p.name ?? p.NAME ?? "Unknown";
+function tooltipHtml(feature) {
+  const name = getDistrictName(feature);
   const id = getDistrictId(feature);
 
-  const v = STATE.latest?.values?.[id];
-  const inc = v?.incidence_7d;
-  const cases = v?.cases_7d;
-  const trend = v?.trend_pct;
+  const v = latestForId(id);
+  const inc = v?.incidence_7d ?? null;
+  const cases = v?.cases_7d ?? null;
+  const trend = v?.trend_pct ?? null;
 
   return `
     <div style="font-weight:600;margin-bottom:4px;">${name}</div>
     <div style="font-size:12px;color:#444;">
-      7-day incidence (0–14): <b>${formatNumber(inc)}</b><br/>
-      7-day cases (0–14): <b>${formatNumber(cases)}</b><br/>
-      Trend vs prev week: <b>${formatNumber(trend)}%</b><br/>
+      7-day incidence (0–14): <b>${formatNumber(inc, 1)}</b><br/>
+      7-day cases (0–14): <b>${formatNumber(cases, 0)}</b><br/>
+      Trend vs prev week: <b>${formatNumber(trend, 1)}%</b><br/>
       ID: <span style="color:#666">${id || "—"}</span>
     </div>
   `;
 }
 
 function onEachFeature(feature, layer) {
-  layer.bindTooltip(() => tooltipText(feature), { sticky: true });
+  layer.bindTooltip(() => tooltipHtml(feature), { sticky: true });
 
   layer.on("click", () => {
-    const p = feature.properties || {};
-    const name = p.gen ?? p.GEN ?? p.name ?? p.NAME ?? "Unknown";
+    const name = getDistrictName(feature);
     const id = getDistrictId(feature);
     showPanel(name, id);
   });
 }
 
-function refreshLayerStyles() {
-  STATE.layer?.setStyle(styleFeature);
-  buildLegend();
-}
-
-async function loadJson(url) {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(`Failed to load ${url}: ${r.status}`);
-  return r.json();
-}
+/* -----------------------------
+   Chart
+------------------------------ */
 
 function initChart() {
-  const ctx = document.getElementById("chart");
-  STATE.chart = new Chart(ctx, {
+  const canvas = $("chart");
+  if (!canvas) return;
+
+  STATE.chart = new Chart(canvas, {
     type: "line",
     data: {
       labels: [],
@@ -166,43 +250,46 @@ function initChart() {
 }
 
 function showPanel(name, id) {
-  document.getElementById("panelTitle").textContent = name;
-  const updated = STATE.latest?.updated_at ?? "unknown date";
+  $("panelTitle").textContent = name;
 
-  const v = STATE.latest?.values?.[id];
+  const updated = STATE.latest?.updated_at ?? "unknown";
+  const v = latestForId(id);
+
   if (!v) {
-    document.getElementById("panelSubtitle").textContent = `No data. Updated: ${updated}`;
-    STATE.chart.data.labels = [];
-    STATE.chart.data.datasets[0].data = [];
-    STATE.chart.update();
+    $("panelSubtitle").textContent = `No data for this district. Updated: ${updated}`;
+    if (STATE.chart) {
+      STATE.chart.data.labels = [];
+      STATE.chart.data.datasets[0].data = [];
+      STATE.chart.update();
+    }
     return;
   }
 
-  document.getElementById("panelSubtitle").textContent =
-    `Updated: ${updated} • 7d incidence: ${formatNumber(v.incidence_7d)} • 7d cases: ${formatNumber(v.cases_7d)} • Trend: ${formatNumber(v.trend_pct)}%`;
+  $("panelSubtitle").textContent =
+    `Updated: ${updated} • 7d incidence: ${formatNumber(v.incidence_7d, 1)} • 7d cases: ${formatNumber(v.cases_7d, 0)} • Trend: ${formatNumber(v.trend_pct, 1)}%`;
 
   const series = STATE.timeseries?.series?.[id];
-  if (!series) {
-    STATE.chart.data.labels = [];
-    STATE.chart.data.datasets[0].data = [];
-    STATE.chart.update();
-    return;
-  }
+  if (!series || !STATE.chart) return;
 
   STATE.chart.data.labels = series.map(pt => pt.date);
   STATE.chart.data.datasets[0].data = series.map(pt => pt.incidence_7d);
   STATE.chart.update();
 }
 
+/* -----------------------------
+   Main init
+------------------------------ */
+
 async function main() {
-  const map = L.map("map", { zoomSnap: 0.25 }).setView([51.1, 10.4], 6);
+  // Map
+  STATE.map = L.map("map", { zoomSnap: 0.25 }).setView(CONFIG.center, CONFIG.zoom);
 
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 10,
-    attribution: '&copy; OpenStreetMap contributors'
-  }).addTo(map);
+  L.tileLayer(CONFIG.tileUrl, {
+    maxZoom: CONFIG.maxZoom,
+    attribution: CONFIG.tileAttribution
+  }).addTo(STATE.map);
 
-  // Load latest values + timeseries + boundaries
+  // Load all data in parallel
   const [latest, timeseries, geo] = await Promise.all([
     loadJson("data/latest.json"),
     loadJson("data/timeseries.json"),
@@ -213,31 +300,46 @@ async function main() {
   STATE.timeseries = timeseries;
   STATE.geo = geo;
 
-  const updatedAt = document.getElementById("updatedAt");
-  updatedAt.textContent = latest.updated_at ? `Updated: ${latest.updated_at}` : "";
+  // Ensure metric_meta exists (older/latest.json might not include it)
+  if (!STATE.latest.metric_meta) STATE.latest.metric_meta = {};
+  for (const m of ["incidence_7d", "cases_7d", "trend_pct"]) {
+    if (!STATE.latest.metric_meta[m]) {
+      STATE.latest.metric_meta[m] = computeMetaMinMax(STATE.latest.values || {}, m);
+    }
+  }
 
-  // Create layer
-  STATE.layer = L.geoJSON(geo, {
-    style: styleFeature,
-    onEachFeature
-  }).addTo(map);
+  // Updated label
+  const updatedAt = $("updatedAt");
+  if (updatedAt) updatedAt.textContent = latest.updated_at ? `Updated: ${latest.updated_at}` : "";
+
+  // Geo layer
+  STATE.layer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(STATE.map);
+
+  // Fit to bounds (Germany)
+  try {
+    STATE.map.fitBounds(STATE.layer.getBounds(), { padding: [10, 10] });
+  } catch (_) { /* ignore */ }
 
   initChart();
   buildLegend();
 
-  // Metric dropdown
-  document.getElementById("metric").addEventListener("change", (e) => {
-    STATE.metric = e.target.value;
-    refreshLayerStyles();
-  });
-
-  // Fit Germany bounds
-  try {
-    map.fitBounds(STATE.layer.getBounds(), { padding: [10, 10] });
-  } catch (_) {}
+  // Metric selector
+  const metricSel = $("metric");
+  if (metricSel) {
+    metricSel.value = STATE.metric;
+    metricSel.addEventListener("change", (e) => {
+      STATE.metric = e.target.value;
+      refreshLayerStyles();
+    });
+  }
 }
 
-main().catch(err => {
+// Start
+main().catch((err) => {
   console.error(err);
-  alert("Failed to load data. Check console for details.");
+  alert(
+    "Failed to load map data.\n\n" +
+    "Open DevTools → Console to see which file failed.\n\n" +
+    String(err)
+  );
 });
