@@ -202,17 +202,16 @@ def build_weekly_state_dataset(
     disease_id: str,
     label: str,
     tsv_url: str,
-    age_group: str,
+    age_groups: list[str],   # <-- CHANGED (list!)
     note: str,
 ):
     rows = fetch_tsv_rows(tsv_url)
     if not rows:
         raise RuntimeError(f"{disease_id}: TSV returned no rows")
 
-    # Expected columns (per RKI docs):
+    # Expected columns:
     # Meldewoche, Region, Region_Id, Altersgruppe, Fallzahl, Inzidenz
-    # Region_Id: "01".."16", plus "00" (Germany total), "NA"
-    by_week_state = defaultdict(lambda: {"inc": None, "cases": 0})
+    by_week_state = defaultdict(lambda: {"cases": 0, "inc": []})
     weeks = set()
 
     for r in rows:
@@ -222,7 +221,7 @@ def build_weekly_state_dataset(
 
         if not week or not state_id or state_id in ("00", "NA"):
             continue
-        if age != age_group:
+        if age not in age_groups:
             continue
 
         cases = safe_int(r.get("Fallzahl"))
@@ -231,82 +230,66 @@ def build_weekly_state_dataset(
         if cases is None:
             continue
 
-        # One row per (week,state,age) usually; but aggregate defensively
         k = (week, state_id)
         by_week_state[k]["cases"] += cases
-        # Inzidenz is already per 100k for that age group in that state.
-        # If duplicates exist, take the last non-null.
         if inc is not None:
-            by_week_state[k]["inc"] = inc
+            by_week_state[k]["inc"].append(inc)
 
         weeks.add(week)
 
     if not weeks:
-        raise RuntimeError(f"{disease_id}: no rows after filtering for age_group={age_group}")
+        raise RuntimeError(
+            f"{disease_id}: no rows after filtering for age_groups={age_groups}"
+        )
 
-    latest_week = max(weeks, key=_iso_week_to_sort_key)
+    def week_key(w):
+        y, wk = w.split("-W")
+        return (int(y), int(wk))
 
-    # limit window
-    weeks_sorted = sorted(weeks, key=_iso_week_to_sort_key)
-    keep_weeks = set(weeks_sorted[-WEEKLY_WEEKS_BACK:])
+    weeks_sorted = sorted(weeks, key=week_key)
+    latest_week = weeks_sorted[-1]
+    keep_weeks = set(weeks_sorted[-WEEKLY_WEEKS_BACK"])
 
-    # Build state series
+    # Build per-state series
     state_series = defaultdict(list)
     for (week, state_id), v in by_week_state.items():
         if week not in keep_weeks:
             continue
+
+        # Average incidence if multiple age bands were combined
+        inc_val = None
+        if v["inc"]:
+            inc_val = sum(v["inc"]) / len(v["inc"])
+
         state_series[state_id].append({
             "date": week,
-            "incidence_7d": None if v["inc"] is None else round(float(v["inc"]), 2),
+            "incidence_7d": None if inc_val is None else round(inc_val, 2),
             "cases_7d": int(v["cases"]),
         })
 
-    for sid in list(state_series.keys()):
-        state_series[sid].sort(key=lambda x: _iso_week_to_sort_key(x["date"]))
+    for sid in state_series:
+        state_series[sid].sort(key=lambda x: week_key(x["date"]))
 
-    # Trend vs previous week for states
-    prev_week = weeks_sorted[weeks_sorted.index(latest_week) - 1] if latest_week in weeks_sorted and weeks_sorted.index(latest_week) > 0 else None
-
+    # Trend vs previous week
+    prev_week = weeks_sorted[-2] if len(weeks_sorted) >= 2 else None
     state_latest = {}
-    for sid, pts in state_series.items():
-        pts_by_week = {p["date"]: p for p in pts}
-        cur = pts_by_week.get(latest_week)
-        if not cur:
-            continue
-        prev = pts_by_week.get(prev_week) if prev_week else None
 
-        inc_latest = cur.get("incidence_7d")
-        inc_prev = prev.get("incidence_7d") if prev else None
+    for sid, pts in state_series.items():
+        cur = next((p for p in pts if p["date"] == latest_week), None)
+        prev = next((p for p in pts if p["date"] == prev_week), None) if prev_week else None
+
+        inc_latest = cur["incidence_7d"] if cur else None
+        inc_prev = prev["incidence_7d"] if prev else None
+
         trend = pct_change(inc_latest, inc_prev)
         trend = None if trend is None else round(trend, 1)
 
         state_latest[sid] = {
             "incidence_7d": inc_latest,
-            "cases_7d": int(cur.get("cases_7d") or 0),
+            "cases_7d": cur["cases_7d"] if cur else None,
             "trend_pct": trend,
         }
 
-    # Expand to Landkreis keys (map expects Landkreis keys)
-    lk_values = {}
-    lk_series = defaultdict(list)
-
-    # Germany has 01..16; Landkreise keys are 5 digits. We'll generate lk values
-    # lazily at runtime in the browser by joining, BUT for simplicity keep same shape:
-    # We write a value for every possible lk key only if we know it.
-    #
-    # Better approach: create per-LK values in the frontend (less JSON).
-    # BUT your app.js currently expects latest.values[lk5] and timeseries.series[lk5].
-    # So here we create per-LK by iterating over 00000..99999 would be insane.
-    #
-    # Practical compromise:
-    # - We store per-state values and series in JSON AND teach app.js to use it.
-    #
-    # To avoid changing UI too much, we’ll store:
-    #   latest.values = { "STATE:01": {...}, ... }
-    #   timeseries.series = { "STATE:01": [..], ... }
-    # and app.js will translate district->state key.
-    #
-    # (See updated app.js below.)
     values = {f"STATE:{sid}": v for sid, v in state_latest.items()}
     series = {f"STATE:{sid}": pts for sid, pts in state_series.items()}
 
@@ -320,7 +303,7 @@ def build_weekly_state_dataset(
         },
         "values": values,
         "resolution": "bundesland",
-        "age_group": age_group,
+        "age_group": "+".join(age_groups),
     }
 
     series_out = {
@@ -328,7 +311,7 @@ def build_weekly_state_dataset(
         "window_days": WEEKLY_WEEKS_BACK * 7,
         "series": series,
         "resolution": "bundesland",
-        "age_group": age_group,
+        "age_group": "+".join(age_groups),
     }
 
     base = os.path.join(OUT_ROOT, disease_id)
@@ -340,8 +323,9 @@ def build_weekly_state_dataset(
         "label": label,
         "metrics": ["incidence_7d", "cases_7d", "trend_pct"],
         "resolution": "bundesland",
-        "age_group": age_group,
+        "age_group": "+".join(age_groups),
     }
+
 
 def main():
     os.makedirs(OUT_ROOT, exist_ok=True)
@@ -351,19 +335,20 @@ def main():
 
     diseases.append(build_weekly_state_dataset(
         disease_id="influenza",
-        label="Influenza (RKI IfSG, Bundesland, age 00–14)",
+        label="Influenza (RKI IfSG, Bundesland, children 0–14)",
         tsv_url=RKI_INFLUENZA_TSV,
-        age_group="00-14",
-        note="Influenza is provided weekly on Bundesland level (Region_Id). Map colors Landkreise by their Bundesland value.",
+        age_groups=["0-4", "5-14", "00-04", "00-14"],
+        note="Influenza weekly IfSG data, Bundesland-level. Children 0–14 years combined.",
     ))
 
     diseases.append(build_weekly_state_dataset(
         disease_id="rsv",
-        label="RSV (RKI IfSG, Bundesland, age 00–04)",
+        label="RSV (RKI IfSG, Bundesland, babies 0–4)",
         tsv_url=RKI_RSV_TSV,
-        age_group="00-04",
-        note="RSV is provided weekly on Bundesland level (Region_Id). Map colors Landkreise by their Bundesland value. Age group used: 00–04 (babies/toddlers).",
+        age_groups=["0-4", "00-04"],
+        note="RSV weekly IfSG data, Bundesland-level. Babies and toddlers (0–4 years).",
     ))
+
 
     index = {
         "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
