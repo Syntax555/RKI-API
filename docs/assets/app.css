@@ -1,0 +1,15 @@
+body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+#topbar {
+  padding: 10px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #eee;
+}
+#map { height: calc(100vh - 76px); }
+select, button, input { padding: 6px; }
+.muted { opacity: 0.75; }
+.group { display: flex; gap: 8px; align-items: center; }
+.group label { display: inline-flex; gap: 6px; align-items: center; }
+.small { font-size: 12px; }

@@ -2,7 +2,7 @@ name: Update data
 
 on:
   schedule:
-    - cron: "30 5 * * *"   # daily 05:30 UTC (06:30 Berlin winter)
+    - cron: "30 5 * * *"   # daily 05:30 UTC (≈ 06:30 Berlin winter)
   workflow_dispatch: {}
 
 permissions:
@@ -20,14 +20,26 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run builder
+      - name: Install deps
+        run: |
+          pip install -r scripts/requirements.txt
+
+      - name: Build signals
         run: |
           python scripts/build_data.py
 
-      - name: Commit changes
+      - name: Build centroids (requires boundaries)
+        run: |
+          python scripts/build_centroids.py
+
+      - name: Build catalog
+        run: |
+          python scripts/build_catalog.py
+
+      - name: Commit & push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add docs/data/*.json
+          git add docs/data/catalog.json docs/data/signals/*.json docs/data/lookups/*.json
           git commit -m "Update data" || echo "No changes"
           git push
