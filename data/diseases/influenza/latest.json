@@ -1,11 +1,1 @@
-{
-  "updated_at": null,
-  "resolution": "bundesland",
-  "notes": "No usable influenza data available for this period.",
-  "values": {},
-  "metric_meta": {
-    "incidence_7d": { "min": 0, "max": 1 },
-    "cases_7d": { "min": 0, "max": 1 },
-    "trend_pct": { "min": 0, "max": 1 }
-  }
-}
+{"updated_at":"2026-W01","notes":"Influenza is provided weekly on Bundesland level (Region_Id). Map colors Landkreise by their Bundesland value. (age mode: filtered)","resolution":"bundesland","age_groups_used":["00-14"],"metric_meta":{"incidence_7d":{"min":8.04,"max":58.08},"cases_7d":{"min":25.0,"max":624.0},"trend_pct":{"min":-46.1,"max":147.1}},"values":{"STATE:08":{"incidence_7d":27.64,"cases_7d":446,"trend_pct":64.6},"STATE:09":{"incidence_7d":33.38,"cases_7d":624,"trend_pct":-17.0},"STATE:11":{"incidence_7d":23.31,"cases_7d":122,"trend_pct":58.5},"STATE:12":{"incidence_7d":27.43,"cases_7d":94,"trend_pct":62.0},"STATE:04":{"incidence_7d":42.37,"cases_7d":42,"trend_pct":147.1},"STATE:02":{"incidence_7d":21.18,"cases_7d":57,"trend_pct":62.8},"STATE:06":{"incidence_7d":29.66,"cases_7d":266,"trend_pct":41.5},"STATE:13":{"incidence_7d":16.21,"cases_7d":33,"trend_pct":50.0},"STATE:03":{"incidence_7d":14.95,"cases_7d":169,"trend_pct":1.8},"STATE:05":{"incidence_7d":13.88,"cases_7d":355,"trend_pct":0.0},"STATE:07":{"incidence_7d":17.9,"cases_7d":103,"trend_pct":-23.7},"STATE:10":{"incidence_7d":19.69,"cases_7d":25,"trend_pct":-7.4},"STATE:14":{"incidence_7d":58.08,"cases_7d":315,"trend_pct":-29.0},"STATE:15":{"incidence_7d":36.42,"cases_7d":98,"trend_pct":-46.1},"STATE:01":{"incidence_7d":8.04,"cases_7d":32,"trend_pct":23.1},"STATE:16":{"incidence_7d":21.16,"cases_7d":57,"trend_pct":-5.0}}}
