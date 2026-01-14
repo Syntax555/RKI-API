@@ -35,7 +35,7 @@ def main():
     member_request = {
         "CubeId": "SurvStat",
         "HierarchyId": disease_hierarchy_id,
-        "Language": "de"
+        "Language": "German"
     }
 
     members = client.service.GetAllHierarchyMembers(member_request)
